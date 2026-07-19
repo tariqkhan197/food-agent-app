@@ -419,16 +419,22 @@ def render_result(result: MealAnalysis) -> None:
     else:
         st.write("-")
 
-    m = result.macros
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Calories", f"{m.calories} kcal")
-    c2.metric("Protein", f"{m.protein_g:.1f} g")
-    c3.metric("Carbs", f"{m.carbs_g:.1f} g")
-    c4.metric("Fats", f"{m.fats_g:.1f} g")
+    if hasattr(result, 'macros') and result.macros:
+        m = result.macros
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Calories", f"{m.calories} kcal")
+        c2.metric("Protein", f"{m.protein_g:.1f} g")
+        c3.metric("Carbs", f"{m.carbs_g:.1f} g")
+        c4.metric("Fats", f"{m.fats_g:.1f} g")
 
-    c5, c6 = st.columns(2)
-    c5.metric("Sodium", f"{m.sodium_mg:.0f} mg")
-    c6.metric("Sugar", f"{m.sugar_g:.1f} g")
+        c5, c6 = st.columns(2)
+        c5.metric("Sodium", f"{m.sodium_mg:.0f} mg")
+        c6.metric("Sugar", f"{m.sugar_g:.1f} g")
+        
+        st.markdown("#### Macro Breakdown")
+        macro_pie_chart(m)
+    else:
+        st.info("Macros data is not available for this item.")
 
     st.markdown("#### Macro Breakdown")
     macro_pie_chart(m)
