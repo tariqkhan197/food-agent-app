@@ -419,8 +419,10 @@ def render_result(result: MealAnalysis) -> None:
     else:
         st.write("-")
 
+    # 1. Macro calculation ka safe block
     if hasattr(result, 'macros') and result.macros:
         m = result.macros
+        
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Calories", f"{m.calories} kcal")
         c2.metric("Protein", f"{m.protein_g:.1f} g")
@@ -436,18 +438,15 @@ def render_result(result: MealAnalysis) -> None:
     else:
         st.info("Macros data is not available for this item.")
 
-    st.markdown("#### Macro Breakdown")
-    macro_pie_chart(m)
-
+    # 2. Goal alignment score (ye block if/else ke bahar rahega taake har haal mein chale)
     score = result.goal_alignment_score
     color = "#4caf50" if score >= 70 else "#ffb300" if score >= 40 else "#ef5350"
     st.markdown(
         f"""
-        <div style="background:#141a24;border-radius:12px;padding:14px 18px;margin:12px 0 6px 0;
-                    border-left:5px solid {color};">
-            <b style="color:{color};font-size:1.05em;">
+        <div style="background:#141a24; border-radius:12px; padding:14px 18px; margin:12px 0 6px 0; border-left:5px solid {color};">
+            <b style="color:{color}; font-size:1.05em;">
                 Goal Alignment Score ({st.session_state.profile['goal']}): {score}/100
-            b>
+            </b>
         </div>
         """,
         unsafe_allow_html=True,
@@ -456,11 +455,13 @@ def render_result(result: MealAnalysis) -> None:
 
     st.markdown("### 🧠 Coach's Analysis")
     st.markdown(
-        f"""<div style="background:#10151f;border:1px solid #232c3a;padding:16px;
-                       border-radius:12px;line-height:1.65;color:#d7dce4;">
-                {result.coach_reasoning}
-            </div>""",
+        f"""
+        <div style="background:#10151f; border:1px solid #232c3a; padding:16px; border-radius:12px; line-height:1.65; color:#d7dce4;">
+            {result.coach_reasoning}
+        </div>
+        """,
         unsafe_allow_html=True,
+    
     )
 
 
