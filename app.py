@@ -508,10 +508,17 @@ def render_main() -> None:
 
             if result and result.is_food:
                 st.session_state.meal_log.append(result.model_dump())
+                if result and result.is_food:
+            st.session_state.meal_log.append(result.model_dump())
+            
+            # Yahan hum check kar rahe hain ke kya 'macros' exist karta hai
+            if hasattr(result, 'macros') and result.macros:
                 st.session_state.consumed_calories += result.macros.calories
                 st.session_state.consumed_macros["protein"] += result.macros.protein_g
                 st.session_state.consumed_macros["carbs"] += result.macros.carbs_g
                 st.session_state.consumed_macros["fats"] += result.macros.fats_g
+            else:
+                st.warning("AI ne khane ki pehchan to ki, lekin macros data nahi bheja.")
 
             st.rerun()
 
