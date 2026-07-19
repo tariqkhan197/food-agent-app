@@ -78,10 +78,24 @@ class MealAnalysis(BaseModel):
         default="",
         description="3-4 sentence physiological explanation plus one concrete actionable swap/tweak",
     )
+    needs_clarification: bool = Field(
+        default=False,
+        description="True if the meal description is too ambiguous to estimate responsibly and a follow-up question is needed first",
+    )
+    clarification_question: str = Field(
+        default="",
+        description="A single, short, specific follow-up question to ask the user when needs_clarification is True",
+    )
 
 
 FITNESS_GOALS = ["Weight Loss", "Muscle Gain", "Lean Bulk", "Diabetic Friendly", "Keto Diet"]
 RESTRICTION_OPTIONS = ["Nuts", "Gluten", "Dairy", "Seafood", "None"]
+
+# Structuring/reasoning model — strict JSON output for the meal-analysis contract.
+STRUCTURING_MODEL = "llama-3.3-70b-versatile"
+# Groq's agentic "Compound" system — can autonomously call a real, live web-search
+# tool before answering. Used only when the user opts in, since it's slower/costlier.
+RESEARCH_MODEL = "groq/compound-mini"
 
 
 # =============================================================================
@@ -105,6 +119,14 @@ def init_state() -> None:
         st.session_state.last_result = None
     if "last_error" not in st.session_state:
         st.session_state.last_error = None
+    if "pending_question" not in st.session_state:
+        st.session_state.pending_question = None  # follow-up question from the agent
+    if "pending_original_query" not in st.session_state:
+        st.session_state.pending_original_query = None
+    if "weekly_insights" not in st.session_state:
+        st.session_state.weekly_insights = None
+    if "weekly_insights_error" not in st.session_state:
+        st.session_state.weekly_insights_error = None
 
 
 # =============================================================================
@@ -130,19 +152,38 @@ def resolve_api_key() -> Optional[str]:
 # 4. THE UNIFIED DUAL-INPUT PROCESSING PIPELINE
 # =============================================================================
 
-def build_system_instruction(user_profile: dict) -> str:
+def build_system_instruction(
+    user_profile: dict,
+    research_context: Optional[str] = None,
+    allow_clarification: bool = True,
+) -> str:
     restrictions = ", ".join(user_profile["restrictions"]) if user_profile["restrictions"] else "None declared"
+
+    research_block = ""
+    if research_context:
+        research_block = f"""
+LIVE WEB RESEARCH (already gathered for you — treat as ground truth, prefer it over your own estimates when it's more specific):
+{research_context}
+"""
+
+    clarification_block = (
+        """0. If the meal description is genuinely too ambiguous to give a responsible estimate (e.g. a totally vague quantity with no clues, or a dish name you don't recognize at all), you MAY ask exactly ONE short, specific clarifying question instead of guessing. To do this, set needs_clarification=true, put your question in clarification_question, and leave the other fields at safe defaults (is_food=true, empty items/zeroed macros). Only do this rarely — for a normal description like "3 rotis and a plate of chicken curry", do NOT ask a question, just make a reasonable assumption instead."""
+        if allow_clarification
+        else """0. You already asked the user one clarifying question and they answered. Do NOT ask another question. needs_clarification MUST be false. Make your best possible estimate now using everything you know, filling in any remaining gaps with reasonable assumptions."""
+    )
+
     return f"""You are NutriAgent, an elite clinical nutrition and dietary coaching AI. You analyze a user's meal description and return a rigorous nutritional breakdown personalized to their health profile.
 
 USER PROFILE:
 - Daily Calorie Target: {user_profile['calorie_target']} kcal
 - Primary Fitness Goal: {user_profile['goal']}
 - Declared Allergies/Restrictions: {restrictions}
-
+{research_block}
 INSTRUCTIONS:
+{clarification_block}
 1. First determine if the input actually describes food or a beverage. If it clearly does not, set is_food=false, write a short polite rejection_message, and fill macros with zeros and identified_items/allergen_alerts as empty lists.
 2. identified_items MUST be a list of plain strings (not objects), each with the quantity baked directly into the text, e.g. "3 rotis", "1 plate of mutton curry (approx. 250g)". If the user gives a vague quantity like "1 plate", assume a standard realistic serving size (e.g. a plate of curry/meat ≈ 250-300g) and state that assumption inside the string itself, e.g. "1 plate of meat curry (~275g, estimated)".
-3. Estimate macros as realistically as possible using standard nutritional databases as a mental reference, using the same portion assumptions from step 2. NEVER return calories or any macro as 0 for real food, even when the user's description is vague — always make a reasonable estimate rather than leaving fields empty or zero.
+3. Estimate macros as realistically as possible using standard nutritional databases as a mental reference (or the live web research above, when provided), using the same portion assumptions from step 2. NEVER return calories or any macro as 0 for real food, even when the user's description is vague — always make a reasonable estimate rather than leaving fields empty or zero.
 4. allergen_alerts must ONLY include items that are BOTH present in the meal AND relevant to the user's declared restrictions above.
 5. goal_alignment_score (1-100): critically evaluate how well this specific meal serves the user's stated Primary Fitness Goal.
 6. coach_reasoning: Write 3-4 dense sentences of physiological reasoning explaining why this meal helps or hurts their specific goal, and end with ONE concrete, actionable swap/tweak.
@@ -162,12 +203,111 @@ Respond ONLY with a single valid JSON object with EXACTLY this structure (no mar
   }},
   "allergen_alerts": [],
   "goal_alignment_score": 62,
-  "coach_reasoning": "..."
+  "coach_reasoning": "...",
+  "needs_clarification": false,
+  "clarification_question": ""
 }}
 """
 
 
-def process_agent_input(text_query: Optional[str] = None, image_file=None, user_profile: Optional[dict] = None):
+def web_research(meal_description: str) -> tuple:
+    """Uses Groq's Compound agentic system, which autonomously calls a real
+    built-in web-search tool, to pull live nutrition facts for branded or
+    restaurant-style foods. Returns (summary_text, error)."""
+    api_key = resolve_api_key()
+    if not api_key:
+        return None, "No Groq API key found."
+    try:
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=RESEARCH_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Search the web for realistic, current nutrition facts (calories, protein, "
+                        "carbs, fats, sodium, sugar) for the following meal. Be concise — a short "
+                        "bullet list of findings with approximate portion sizes is enough:\n\n"
+                        f"{meal_description}"
+                    ),
+                }
+            ],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        text = response.choices[0].message.content
+        return (text or "").strip(), None
+    except Exception as e:
+        return None, f"Live web search failed, continuing with the model's own estimate ({e})."
+
+
+def generate_weekly_insights(meal_log: list, user_profile: dict) -> tuple:
+    """Looks at everything logged so far and proactively surfaces patterns —
+    this is the 'agent' behavior that goes beyond a single stateless call."""
+    if not meal_log:
+        return None, "No meals logged yet — analyze a few meals first."
+
+    api_key = resolve_api_key()
+    if not api_key:
+        return None, "No Groq API key found."
+
+    try:
+        client = Groq(api_key=api_key)
+    except Exception as e:
+        return None, f"Failed to initialize the Groq client: {e}"
+
+    log_summary = json.dumps(
+        [
+            {
+                "items": entry.get("identified_items", []),
+                "macros": entry.get("macros", {}),
+                "goal_alignment_score": entry.get("goal_alignment_score"),
+            }
+            for entry in meal_log
+        ],
+        ensure_ascii=False,
+    )
+
+    prompt = f"""You are NutriAgent reviewing a user's logged meals for patterns, proactively — they did not ask a specific question.
+
+USER PROFILE: goal={user_profile['goal']}, daily calorie target={user_profile['calorie_target']} kcal, restrictions={user_profile['restrictions']}
+
+LOGGED MEALS (most recent session):
+{log_summary}
+
+Write a short, encouraging but honest coaching note (4-6 sentences, plain text, no JSON, no markdown headers) that:
+- Points out 1-2 real patterns you can see in the data (e.g. consistently low protein, high sodium, skipped meals implied by low count)
+- Connects it to their specific goal
+- Ends with ONE concrete, actionable suggestion for their next meal
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=STRUCTURING_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=400,
+        )
+        text = response.choices[0].message.content
+        if not text:
+            return None, "The agent returned an empty insight. Please try again."
+        return text.strip(), None
+    except Exception as e:
+        return None, f"Agent API error: {e}"
+
+
+def process_agent_input(
+    text_query: Optional[str] = None,
+    image_file=None,
+    user_profile: Optional[dict] = None,
+    research_context: Optional[str] = None,
+    clarification_qa: Optional[tuple] = None,
+):
+    """
+    clarification_qa: optional (question, answer) tuple from a prior round —
+    when present, the agent is told not to ask another question and must
+    finalize its estimate using the extra info.
+    """
     if not text_query and image_file is None:
         return None, "No input provided. Please enter a description or upload an image."
 
@@ -187,13 +327,19 @@ def process_agent_input(text_query: Optional[str] = None, image_file=None, user_
     if image_file is not None:
         contents += "[An image was uploaded by the user. Please analyze the nutritional value primarily based on the text description provided and context.]"
 
-    system_instruction = build_system_instruction(user_profile or {
-        "calorie_target": 2000, "goal": "Weight Loss", "restrictions": []
-    })
+    if clarification_qa:
+        question, answer = clarification_qa
+        contents += f"\n[Follow-up] You previously asked: \"{question}\"\nUser's answer: \"{answer}\"\n"
+
+    system_instruction = build_system_instruction(
+        user_profile or {"calorie_target": 2000, "goal": "Weight Loss", "restrictions": []},
+        research_context=research_context,
+        allow_clarification=clarification_qa is None,
+    )
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=STRUCTURING_MODEL,
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": contents},
@@ -357,10 +503,27 @@ def render_sidebar() -> None:
             st.session_state.last_result = None
             st.rerun()
 
+        st.divider()
+        st.markdown("### 🧠 Weekly AI Insights")
+        st.caption("The agent reviews your logged meals and proactively surfaces patterns.")
+        if st.button("✨ Generate Insights", use_container_width=True):
+            with st.spinner("Reviewing your meal log for patterns..."):
+                insight, insight_err = generate_weekly_insights(
+                    st.session_state.meal_log, st.session_state.profile
+                )
+            st.session_state.weekly_insights = insight
+            st.session_state.weekly_insights_error = insight_err
+
+        if st.session_state.weekly_insights_error:
+            st.warning(st.session_state.weekly_insights_error)
+        elif st.session_state.weekly_insights:
+            st.info(st.session_state.weekly_insights)
+
         with st.expander("⚙️ Agent Configuration"):
             key_status = "✅ Detected" if resolve_api_key() else "❌ Missing"
             st.caption(f"GROQ_API_KEY: {key_status}")
-            st.caption("Model: `llama-3.3-70b-versatile`")
+            st.caption(f"Structuring model: `{STRUCTURING_MODEL}`")
+            st.caption(f"Research model: `{RESEARCH_MODEL}` (web search)")
 
 
 # =============================================================================
@@ -508,7 +671,8 @@ def render_history() -> None:
 def render_main() -> None:
     st.title("🥗 NutriAgent")
     st.caption(
-        "Your AI Dietary Health Agent — log meals by text, photo, or both, and get "
+        "Your AI Dietary Health Agent — log meals by text, photo, or both, optionally search "
+        "the live web for accuracy, get asked a follow-up question when needed, and receive "
         "physiologically-grounded coaching tailored to your goals and restrictions."
     )
 
@@ -524,22 +688,43 @@ def render_main() -> None:
         if image_file is not None:
             st.image(image_file, use_container_width=True)
 
+    use_web_search = st.checkbox(
+        "🌐 Use live web search (better for branded/restaurant food, a bit slower)"
+    )
+
     analyze_clicked = st.button("🔍 Analyze Meal", type="primary", use_container_width=True)
 
     if analyze_clicked:
         if not text_query and image_file is None:
             st.warning("Please enter a meal description or upload a photo before analyzing.")
         else:
+            # Starting a fresh analysis clears any earlier unanswered follow-up question.
+            st.session_state.pending_question = None
+            st.session_state.pending_original_query = None
+
+            research_context, research_err = None, None
+            if use_web_search and text_query:
+                with st.spinner("🌐 Agent is searching the web for live nutrition data..."):
+                    research_context, research_err = web_research(text_query)
+
             with st.spinner("NutriAgent is cross-referencing your meal against your health profile..."):
                 result, error = process_agent_input(
                     text_query=text_query or None,
                     image_file=image_file,
                     user_profile=st.session_state.profile,
+                    research_context=research_context,
                 )
+
+            if research_err:
+                st.warning(research_err)  # non-fatal — analysis still proceeds without live search
             st.session_state.last_error = error
             st.session_state.last_result = result
 
-            if result and result.is_food:
+            if result and result.needs_clarification:
+                st.session_state.pending_question = result.clarification_question
+                st.session_state.pending_original_query = text_query
+                st.session_state.last_result = None
+            elif result and result.is_food:
                 st.session_state.meal_log.append(result.model_dump())
                 st.session_state.consumed_calories += result.macros.calories
                 st.session_state.consumed_macros["protein"] += result.macros.protein_g
@@ -547,6 +732,41 @@ def render_main() -> None:
                 st.session_state.consumed_macros["fats"] += result.macros.fats_g
 
             st.rerun()
+
+    # --- Multi-step follow-up: the agent asked a clarifying question ---
+    if st.session_state.pending_question:
+        st.markdown(
+            f"""
+            <div style="background:#141a24;border:1px solid #3a9c73;border-radius:12px;
+                        padding:14px 18px;margin:10px 0;">
+                <b>🤖 NutriAgent needs one more detail:</b><br>{st.session_state.pending_question}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        clarification_answer = st.text_input("Your answer", key="clarification_answer_input")
+        if st.button("↪️ Continue Analysis", use_container_width=True):
+            if clarification_answer.strip():
+                with st.spinner("NutriAgent is finalizing your meal analysis..."):
+                    result, error = process_agent_input(
+                        text_query=st.session_state.pending_original_query,
+                        user_profile=st.session_state.profile,
+                        clarification_qa=(st.session_state.pending_question, clarification_answer),
+                    )
+                st.session_state.last_error = error
+                st.session_state.last_result = result
+                st.session_state.pending_question = None
+                st.session_state.pending_original_query = None
+
+                if result and result.is_food:
+                    st.session_state.meal_log.append(result.model_dump())
+                    st.session_state.consumed_calories += result.macros.calories
+                    st.session_state.consumed_macros["protein"] += result.macros.protein_g
+                    st.session_state.consumed_macros["carbs"] += result.macros.carbs_g
+                    st.session_state.consumed_macros["fats"] += result.macros.fats_g
+                st.rerun()
+            else:
+                st.warning("Please type an answer before continuing.")
 
     if st.session_state.last_error:
         st.error(st.session_state.last_error)
