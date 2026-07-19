@@ -108,7 +108,10 @@ def init_state() -> None:
 # 3. API KEY RESOLUTION
 # =============================================================================
 
+import os
+
 def resolve_api_key():
+    return os.environ.get("GROQ_API_KEY")
     
 
 
