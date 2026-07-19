@@ -367,9 +367,16 @@ def macro_pie_chart(macros: Macros):
 
 
 def render_allergen_alert(result: MealAnalysis) -> None:
-    profile_restrictions = [r.lower() for r in st.session_state.profile["restrictions"]]
-    if not profile_restrictions or not result.allergen_alerts:
+    # Check karo agar profile mein koi restrictions hain
+    if "restrictions" not in st.session_state.profile:
         return
+        
+    profile_restrictions = [r.lower() for r in st.session_state.profile["restrictions"]]
+    
+    # Yahan humne safe check lagaya hai
+    if not profile_restrictions or not hasattr(result, 'allergen_alerts') or not result.allergen_alerts:
+        return
+        
     matched = [
         a for a in result.allergen_alerts
         if any(r in a.lower() or a.lower() in r for r in profile_restrictions)
