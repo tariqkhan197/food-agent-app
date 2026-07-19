@@ -2,23 +2,24 @@
 NutriAgent — AI Nutrition & Dietary Health Agent
 =================================================
 A production-grade Streamlit application powered by Groq Llama-3.3
-that analyzes meals from text, enforces strict structured (JSON) output, 
-cross-references results against a persistent user health profile, 
+that analyzes meals from text, enforces strict structured (JSON) output,
+cross-references results against a persistent user health profile,
 and renders a premium dark-slate coaching dashboard.
 
 SETUP
 -----
-1. pip install streamlit groq pydantic plotly pillow
-2. Provide your Groq API key via:
-      .streamlit/secrets.toml  ->  GROQ_API_KEY = "gsk_..."
+1. pip install -r requirements.txt
+2. Provide your Groq API key via ONE of:
+      - .streamlit/secrets.toml  ->  GROQ_API_KEY = "gsk_..."
+      - environment variable     ->  export GROQ_API_KEY="gsk_..."
+   On Streamlit Community Cloud, set GROQ_API_KEY under
+   App settings -> Secrets.
 3. streamlit run app.py
 """
 
-import io
 import json
 import os
-from datetime import datetime
-from typing import List, Any,Optional
+from typing import Any, List, Optional
 
 import streamlit as st
 from groq import Groq
@@ -27,11 +28,6 @@ try:
     import plotly.graph_objects as go
 except ImportError:  # pragma: no cover
     go = None
-
-try:
-    from PIL import Image
-except ImportError:  # pragma: no cover
-    Image = None
 
 try:
     from pydantic import BaseModel, Field, ValidationError
@@ -59,25 +55,28 @@ class MealAnalysis(BaseModel):
         default="",
         description="Polite explanation if is_food is False, otherwise empty string",
     )
-    identified_items: List[Any] = Field(
+    identified_items: List[str] = Field(
         default_factory=list,
-        description="Specific identified components of the meal, e.g. ['2 whole wheat rotis', 'chicken haleem', '1 glass whole milk']",
+        description="Specific identified components of the meal as plain strings with quantity baked in, e.g. ['3 rotis', '1 plate of mutton curry']",
     )
-    class Macros(BaseModel):
-        calories: float = Field(description="Total calories in kcal")
-        protein: float = Field(description="Protein in grams")
-        carbs: float = Field(description="Carbohydrates in grams")
-        fats: float = Field(description="Fats in grams")
-        sodium: float = Field(description="Sodium in milligrams")
-        sugar: float = Field(description="Sugar in grams"
-
+    macros: Macros = Field(
+        default_factory=lambda: Macros(
+            calories=0, protein_g=0.0, carbs_g=0.0, fats_g=0.0, sodium_mg=0.0, sugar_g=0.0
+        ),
+        description="Full macro/nutrient breakdown for the meal",
+    )
+    allergen_alerts: List[str] = Field(
+        default_factory=list,
+        description="Items in the meal that match the user's declared restrictions/allergies",
     )
     goal_alignment_score: int = Field(
+        default=0,
         ge=0, le=100,
         description="1-100 score of how well this meal aligns with the user's stated fitness goal",
     )
     coach_reasoning: str = Field(
-        description="3-4 sentence physiological explanation plus one concrete actionable swap/tweak"
+        default="",
+        description="3-4 sentence physiological explanation plus one concrete actionable swap/tweak",
     )
 
 
@@ -112,11 +111,19 @@ def init_state() -> None:
 # 3. API KEY RESOLUTION
 # =============================================================================
 
-import os
-
-def resolve_api_key():
+def resolve_api_key() -> Optional[str]:
+    """Look for the Groq API key in Streamlit secrets first (the recommended
+    path for local `.streamlit/secrets.toml` and for Streamlit Community
+    Cloud's Secrets manager), then fall back to an environment variable so
+    the app also works in other hosting environments/containers."""
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        # st.secrets raises if no secrets.toml exists at all - that's fine,
+        # just fall through to the environment variable check below.
+        pass
     return os.environ.get("GROQ_API_KEY")
-    
 
 
 # =============================================================================
@@ -134,13 +141,29 @@ USER PROFILE:
 
 INSTRUCTIONS:
 1. First determine if the input actually describes food or a beverage. If it clearly does not, set is_food=false, write a short polite rejection_message, and fill macros with zeros and identified_items/allergen_alerts as empty lists.
-2. Identify each distinct food/drink component separately in identified_items with realistic portion sizes.
-3. Estimate macros (calories, protein_g, carbs_g, fats_g, sodium_mg, sugar_g) as realistically as possible using standard food databases. Always return the complete macros object for every food item identified; if data is missing, provide a reasonable estimate.
+2. identified_items MUST be a list of plain strings (not objects), each with the quantity baked directly into the text, e.g. "3 rotis", "1 plate of mutton curry (approx. 250g)". If the user gives a vague quantity like "1 plate", assume a standard realistic serving size (e.g. a plate of curry/meat ≈ 250-300g) and state that assumption inside the string itself, e.g. "1 plate of meat curry (~275g, estimated)".
+3. Estimate macros as realistically as possible using standard nutritional databases as a mental reference, using the same portion assumptions from step 2. NEVER return calories or any macro as 0 for real food, even when the user's description is vague — always make a reasonable estimate rather than leaving fields empty or zero.
 4. allergen_alerts must ONLY include items that are BOTH present in the meal AND relevant to the user's declared restrictions above.
 5. goal_alignment_score (1-100): critically evaluate how well this specific meal serves the user's stated Primary Fitness Goal.
 6. coach_reasoning: Write 3-4 dense sentences of physiological reasoning explaining why this meal helps or hurts their specific goal, and end with ONE concrete, actionable swap/tweak.
 
-Respond ONLY with a single valid JSON object matching the required schema structure. No markdown fences, no formatting text, no explanations outside JSON.
+Respond ONLY with a single valid JSON object with EXACTLY this structure (no markdown fences, no text outside the JSON). identified_items must be plain strings like the example below, never objects with separate "item"/"portion_size" keys:
+{{
+  "is_food": true,
+  "rejection_message": "",
+  "identified_items": ["3 rotis (whole wheat, ~30g each)", "1 plate of mutton curry (~275g, estimated)"],
+  "macros": {{
+    "calories": 650,
+    "protein_g": 35.0,
+    "carbs_g": 60.0,
+    "fats_g": 22.0,
+    "sodium_mg": 780.0,
+    "sugar_g": 9.0
+  }},
+  "allergen_alerts": [],
+  "goal_alignment_score": 62,
+  "coach_reasoning": "..."
+}}
 """
 
 
@@ -150,7 +173,7 @@ def process_agent_input(text_query: Optional[str] = None, image_file=None, user_
 
     api_key = resolve_api_key()
     if not api_key:
-        return None, "No Groq API key found. Set GROQ_API_KEY in `.streamlit/secrets.toml`."
+        return None, "No Groq API key found. Set GROQ_API_KEY in `.streamlit/secrets.toml` (or as an environment variable)."
 
     try:
         client = Groq(api_key=api_key)
@@ -160,12 +183,12 @@ def process_agent_input(text_query: Optional[str] = None, image_file=None, user_
     contents = ""
     if text_query:
         contents += f"User Text Description: {text_query.strip()}\n"
-    
+
     if image_file is not None:
         contents += "[An image was uploaded by the user. Please analyze the nutritional value primarily based on the text description provided and context.]"
 
     system_instruction = build_system_instruction(user_profile or {
-        "calorie_target": 200, "goal": "Weight Loss", "restrictions": []
+        "calorie_target": 2000, "goal": "Weight Loss", "restrictions": []
     })
 
     try:
@@ -173,7 +196,7 @@ def process_agent_input(text_query: Optional[str] = None, image_file=None, user_
             model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_instruction},
-                {"role": "user", "content": contents}
+                {"role": "user", "content": contents},
             ],
             response_format={"type": "json_object"},
             temperature=0.2,
@@ -334,7 +357,7 @@ def render_sidebar() -> None:
 # 7. UI — RESULT RENDERING (Allergen Interceptor, Macros, Coaching)
 # =============================================================================
 
-def macro_pie_chart(macros: Macros):
+def macro_pie_chart(macros: Macros) -> None:
     if go is None:
         st.info("Install `plotly` for macro visualizations: pip install plotly")
         return
@@ -367,16 +390,9 @@ def macro_pie_chart(macros: Macros):
 
 
 def render_allergen_alert(result: MealAnalysis) -> None:
-    # Check karo agar profile mein koi restrictions hain
-    if "restrictions" not in st.session_state.profile:
-        return
-        
     profile_restrictions = [r.lower() for r in st.session_state.profile["restrictions"]]
-    
-    # Yahan humne safe check lagaya hai
-    if not profile_restrictions or not hasattr(result, 'allergen_alerts') or not result.allergen_alerts:
+    if not profile_restrictions or not result.allergen_alerts:
         return
-        
     matched = [
         a for a in result.allergen_alerts
         if any(r in a.lower() or a.lower() in r for r in profile_restrictions)
@@ -411,40 +427,35 @@ def render_result(result: MealAnalysis) -> None:
     if result.identified_items:
         for item_data in result.identified_items:
             if isinstance(item_data, dict):
-                name = item_data.get('item', '')
-                portion = item_data.get('portion_size', '')
+                name = item_data.get("item", "")
+                portion = item_data.get("portion_size", "")
                 st.write(f"• **{name}** ({portion})")
             else:
                 st.write(f"• {item_data}")
     else:
         st.write("-")
 
-    # 1. Macro calculation ka safe block
-    if hasattr(result, 'macros') and result.macros:
-        m = result.macros
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Calories", f"{m.calories} kcal")
-        c2.metric("Protein", f"{m.protein_g:.1f} g")
-        c3.metric("Carbs", f"{m.carbs_g:.1f} g")
-        c4.metric("Fats", f"{m.fats_g:.1f} g")
+    m = result.macros
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Calories", f"{m.calories} kcal")
+    c2.metric("Protein", f"{m.protein_g:.1f} g")
+    c3.metric("Carbs", f"{m.carbs_g:.1f} g")
+    c4.metric("Fats", f"{m.fats_g:.1f} g")
 
-        c5, c6 = st.columns(2)
-        c5.metric("Sodium", f"{m.sodium_mg:.0f} mg")
-        c6.metric("Sugar", f"{m.sugar_g:.1f} g")
-        
-        st.markdown("#### Macro Breakdown")
-        macro_pie_chart(m)
-    else:
-        st.info("Macros data is not available for this item.")
+    c5, c6 = st.columns(2)
+    c5.metric("Sodium", f"{m.sodium_mg:.0f} mg")
+    c6.metric("Sugar", f"{m.sugar_g:.1f} g")
 
-    # 2. Goal alignment score (ye block if/else ke bahar rahega taake har haal mein chale)
+    st.markdown("#### Macro Breakdown")
+    macro_pie_chart(m)
+
     score = result.goal_alignment_score
     color = "#4caf50" if score >= 70 else "#ffb300" if score >= 40 else "#ef5350"
     st.markdown(
         f"""
-        <div style="background:#141a24; border-radius:12px; padding:14px 18px; margin:12px 0 6px 0; border-left:5px solid {color};">
-            <b style="color:{color}; font-size:1.05em;">
+        <div style="background:#141a24;border-radius:12px;padding:14px 18px;margin:12px 0 6px 0;
+                    border-left:5px solid {color};">
+            <b style="color:{color};font-size:1.05em;">
                 Goal Alignment Score ({st.session_state.profile['goal']}): {score}/100
             </b>
         </div>
@@ -455,13 +466,11 @@ def render_result(result: MealAnalysis) -> None:
 
     st.markdown("### 🧠 Coach's Analysis")
     st.markdown(
-        f"""
-        <div style="background:#10151f; border:1px solid #232c3a; padding:16px; border-radius:12px; line-height:1.65; color:#d7dce4;">
-            {result.coach_reasoning}
-        </div>
-        """,
+        f"""<div style="background:#10151f;border:1px solid #232c3a;padding:16px;
+                       border-radius:12px;line-height:1.65;color:#d7dce4;">
+                {result.coach_reasoning}
+            </div>""",
         unsafe_allow_html=True,
-    
     )
 
 
@@ -472,7 +481,7 @@ def render_history() -> None:
         formatted_items = []
         for item_data in raw_items:
             if isinstance(item_data, dict):
-                formatted_items.append(item_data.get('item', 'Meal'))
+                formatted_items.append(item_data.get("item", "Meal"))
             else:
                 formatted_items.append(str(item_data))
 
@@ -503,7 +512,7 @@ def render_main() -> None:
     with col2:
         image_file = st.file_uploader("Or upload a photo", type=["png", "jpg", "jpeg", "webp"])
         if image_file is not None:
-            st.image(image_file, use_column_width=True)
+            st.image(image_file, use_container_width=True)
 
     analyze_clicked = st.button("🔍 Analyze Meal", type="primary", use_container_width=True)
 
@@ -521,16 +530,11 @@ def render_main() -> None:
             st.session_state.last_result = result
 
             if result and result.is_food:
-               st.session_state.meal_log.append(result.model_dump())
-            
-            # Yahan check karo ke ye lines 'if' ke andar hain (tab press kar ke aage karo)
-            if hasattr(result, 'macros') and result.macros:
+                st.session_state.meal_log.append(result.model_dump())
                 st.session_state.consumed_calories += result.macros.calories
                 st.session_state.consumed_macros["protein"] += result.macros.protein_g
                 st.session_state.consumed_macros["carbs"] += result.macros.carbs_g
                 st.session_state.consumed_macros["fats"] += result.macros.fats_g
-            else:
-                st.warning("AI ne khane ki pehchan to ki, lekin macros data nahi bheja.")
 
             st.rerun()
 
