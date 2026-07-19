@@ -507,11 +507,9 @@ def render_main() -> None:
             st.session_state.last_result = result
 
             if result and result.is_food:
-                st.session_state.meal_log.append(result.model_dump())
-                if result and result.is_food:
-            st.session_state.meal_log.append(result.model_dump())
+               st.session_state.meal_log.append(result.model_dump())
             
-            # Yahan hum check kar rahe hain ke kya 'macros' exist karta hai
+            # Yahan check karo ke ye lines 'if' ke andar hain (tab press kar ke aage karo)
             if hasattr(result, 'macros') and result.macros:
                 st.session_state.consumed_calories += result.macros.calories
                 st.session_state.consumed_macros["protein"] += result.macros.protein_g
