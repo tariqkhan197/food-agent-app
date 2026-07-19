@@ -135,7 +135,7 @@ USER PROFILE:
 INSTRUCTIONS:
 1. First determine if the input actually describes food or a beverage. If it clearly does not, set is_food=false, write a short polite rejection_message, and fill macros with zeros and identified_items/allergen_alerts as empty lists.
 2. Identify each distinct food/drink component separately in identified_items with realistic portion sizes.
-3. Estimate macros (calories, protein_g, carbs_g, fats_g, sodium_mg, sugar_g) as realistically as possible using standard nutritional databases as a mental reference. Never leave macros at zero for real food.
+3. Estimate macros (calories, protein_g, carbs_g, fats_g, sodium_mg, sugar_g) as realistically as possible using standard food databases. Always return the complete macros object for every food item identified; if data is missing, provide a reasonable estimate.
 4. allergen_alerts must ONLY include items that are BOTH present in the meal AND relevant to the user's declared restrictions above.
 5. goal_alignment_score (1-100): critically evaluate how well this specific meal serves the user's stated Primary Fitness Goal.
 6. coach_reasoning: Write 3-4 dense sentences of physiological reasoning explaining why this meal helps or hurts their specific goal, and end with ONE concrete, actionable swap/tweak.
