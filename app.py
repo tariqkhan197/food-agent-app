@@ -63,10 +63,13 @@ class MealAnalysis(BaseModel):
         default_factory=list,
         description="Specific identified components of the meal, e.g. ['2 whole wheat rotis', 'chicken haleem', '1 glass whole milk']",
     )
-    macros: Macros
-    allergen_alerts: List[str] = Field(
-        default_factory=list,
-        description="Allergens/restricted ingredients detected in the meal that match the user's stated restrictions",
+    class Macros(BaseModel):
+    calories: float = Field(description="Total calories in kcal")
+    protein: float = Field(description="Protein in grams")
+    carbs: float = Field(description="Carbohydrates in grams")
+    fats: float = Field(description="Fats in grams")
+    sodium: float = Field(description="Sodium in milligrams")
+    sugar: float = Field(description="Sugar in grams"
     )
     goal_alignment_score: int = Field(
         ge=0, le=100,
