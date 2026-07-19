@@ -268,6 +268,16 @@ def inject_theme() -> None:
             border-radius: 12px;
             padding: 10px 14px;
         }
+        div[data-testid="stMetricValue"] {
+            color: #f2f4f8 !important;
+            font-weight: 700 !important;
+        }
+        div[data-testid="stMetricLabel"] {
+            color: #9aa5b1 !important;
+        }
+        div[data-testid="stMetricDelta"] {
+            color: #9aa5b1 !important;
+        }
         div[data-testid="stExpander"] {
             background: #10151f;
             border: 1px solid #232c3a;
