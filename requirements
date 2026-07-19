@@ -1,0 +1,5 @@
+streamlit>=1.38
+google-genai>=0.3.0
+pydantic>=2.6
+plotly>=5.20
+pillow>=10.0
